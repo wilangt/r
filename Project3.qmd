@@ -1,0 +1,178 @@
+---
+title: "Project Evaluation 3 - Scabia et al."
+author: "Albane Knoche"
+date: 04/18/2023
+date-format: long
+eval: false
+warning: false
+format:
+  html:
+    code-fold: false
+    embed-resources: true
+  pdf:
+    papersize: a4
+    fig-width: 8
+    fig-height: 6
+---
+```{r}
+#| label: Load files
+library(biomaRt)
+
+raw.counts = read.table("datasets/updated_counts.txt")
+coldata = read.table("datasets/updated_metadata.txt")
+
+## transform numbers into strings for later...
+#coldata$batch = as.character(coldata$batch)
+
+ensembl = useEnsembl(biomart="genes", dataset="hsapiens_gene_ensembl") 
+tgene = getBM(
+           attributes=c("ensembl_gene_id", 'transcript_length', "external_gene_name"),
+           filters="ensembl_gene_id",
+           values=rownames(raw.counts), mart=ensembl)
+t2 = as.data.frame(
+           sapply(split(tgene$transcript_length, tgene$ensembl_gene_id), max))
+t3 = as.data.frame(
+           sapply(split(tgene$external_gene_name, tgene$ensembl_gene_id), unique))
+gene.annot = t2
+names(gene.annot) = "length"
+gene.annot[rownames(t3), "gene_name"] = t3[,1]
+```
+
+```{r}
+#updated.coldata = merge(coldata, gene.annot, all.x = FALSE)
+#R aborted, fatal error
+```
+
+```{r}
+txl = gene.annot[rownames(raw.counts),"length"]
+lsize = apply(raw.counts, 2, sum)
+rpkm = sweep(sweep(raw.counts, 1, 1e-3*txl, "/"), 2, 1e-6*lsize, "/")
+
+sample.by.gene = apply(rpkm > 0, 1, sum)
+median.by.gene = apply(rpkm, 1, median)
+ExprGenes = which(sample.by.gene > 44 & median.by.gene > 1)
+
+#l2rpkm = log2(rpkm[ExprGenes,])
+#lognorm = sweep(l2rpkm, 2, apply(l2rpkm, 2, median, na.rm=T))
+
+#par(mfrow=c(2,1), mar=c(4,4,0,0)+.5, las=2, lwd=2, lty=1,
+    #cex.axis=.6, pch=20, cex=.5)
+#boxplot(l2rpkm, lty=1)
+#boxplot(lognorm, lty=1)
+```
+
+```{r}
+resp=c('T111','T113','METS15')
+nonresp=c('T105','T110','T109')
+
+#ExprGenes_df <- as.data.frame(ExprGenes)
+ExprGenes_names = names(ExprGenes)
+
+resp_names=subset(coldata, pdx %in% resp & treatment=='P4')$sample_name
+nonresp_names=subset(coldata, pdx %in% nonresp &treatment=='P4')$sample_name
+
+#resp_df=subset(raw.counts, rownames(raw.counts) %in% ExprGenes_names & colnames(raw.counts) %in% resp_names)
+#resp_df=subset(raw.counts, rownames(raw.counts) %in% ExprGenes_names)
+resp_df=subset(rpkm, rownames(raw.counts) %in% ExprGenes_names)
+resp_df=resp_df[,resp_names]
+#nonresp_df=subset(raw.counts, rownames(raw.counts) %in% ExprGenes_names & colnames(raw.counts) %in% nonresp_names)
+#nonresp_df=subset(raw.counts, rownames(raw.counts) %in% ExprGenes_names)
+nonresp_df=subset(rpkm, rownames(raw.counts) %in% ExprGenes_names)
+nonresp_df=nonresp_df[,nonresp_names]
+```
+
+
+```{r}
+l2resp = log2(resp_df)
+lognorm_resp = sweep(l2resp, 2, apply(l2resp, 2, median, na.rm=T))
+
+l2nonresp = log2(nonresp_df)
+lognorm_nonresp = sweep(l2nonresp, 2, apply(l2nonresp, 2, median, na.rm=T))
+
+#lognorm_merge=merge(lognorm_resp,lognorm_nonresp)
+```
+
+```{r}
+coldata_resp=coldata[resp_names,]
+coldata_nonresp=coldata[nonresp_names,]
+coldata_merge=rbind(coldata_resp,coldata_nonresp)
+```
+
+
+```{r}
+library(limma)
+
+design = model.matrix(~0+pdx, data=coldata_resp)
+voom_resp <- voom(abs(resp_df),design,plot=TRUE)
+lin.models = lmFit(voom_resp, design)
+fit = eBayes(lin.models)
+degs_resp = topTable(fit, coef=ncol(design), number=Inf)
+#degs$log2_resp = log2(degs$AveExpr)
+#degs$lognorm=sweep(degs[c('log2_resp')], 2, apply(degs[c('log2_resp')], 2, median, na.rm=T))
+Isignif = which(abs(degs_resp$logFC) > 1 & degs_resp$adj.P.Val < .05)
+fc = degs_resp$logFC
+lp = -log10(degs_resp$adj.P.Val)
+
+par(mar=c(4,4,0,0)+.5, las=1, lwd=2, lty=1, pch=20)
+plot(fc, lp, xlab="log2 (fold-change)", ylab="-log10(adj.p-value)")
+points(fc[Isignif], lp[Isignif], col=2)
+text(fc[Isignif], lp[Isignif], 
+     gene.annot[rownames(degs_resp)[Isignif], "gene_name"],
+     pos=1, cex=.5)
+```
+
+```{r}
+#5b nonresponders
+```
+
+```{r}
+#5d
+library(dplyr)
+degs_resp <- tibble::rownames_to_column(degs_resp, "Gene")
+gene.annot <- tibble::rownames_to_column(gene.annot, "Gene")
+#degs_resp$gene_name <- NA
+#degs_resp <- merge(degs_resp, gene.annot, by="Gene", all.x = FALSE)
+degs_resp <- left_join(degs_resp, gene.annot, by="Gene")
+colnames(degs_resp)[colnames(degs_resp)=="gene_name"]="gene_symbol"
+degs_resp <- mutate(degs_resp, rank_metric =  -log10(P.Value) * sign(logFC))
+degs_resp <- arrange(degs_resp, desc(rank_metric))
+
+
+degs_resp %>% select(gene_symbol, rank_metric, logFC, P.Value) 
+degs_resp <-slice_max(degs_resp, order_by = abs(rank_metric), n = 10)
+```
+```{r}
+degs_resp$gene_symbol<- gsub('[MT-]','',degs_resp$gene_symbol)
+degs_resp
+```
+
+```{r}
+library(msigdbr)
+
+pathways <- msigdbr(species = "Homo sapiens", category = "H")
+```
+
+```{r}
+library(clusterProfiler)
+
+# we select the right columns of the gene sets. This dataframe should 
+# have two columns, first the gene set name and second the gene symbol or 
+# ensembl/entrez
+pathways_gsea <- pathways %>% select(gs_name, gene_symbol)
+final_resp <- merge(pathways_gsea, degs_resp, by="gene_symbol")
+
+gsea_results <- clusterProfiler::GSEA(
+    geneList = final_resp %>%
+        # get the column with the values as vector
+        dplyr::pull(rank_metric) %>%
+        # add the gene names as names in the vector
+        `names<-`(final_resp$gene_symbol),
+    # add 1 as p-value cutoff so you get the results from all pathways.
+    # you can later filter on the value you want
+    pvalueCutoff = 1, 
+    # table with the pathway names and gene names
+    TERM2GENE = pathways_gsea, 
+    eps = 0
+)
+```
+

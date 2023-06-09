@@ -1,0 +1,186 @@
+---
+title: "8. Bulk Gene Expressioni - Scabia et al."
+author: "EPFL - SV - BIO-463"
+date: 04/18/2023
+date-format: long
+eval: false
+warning: false
+format:
+  html:
+    code-fold: false
+    embed-resources: true
+  pdf:
+    papersize: a4
+    fig-width: 8
+    fig-height: 6
+---
+
+The dataset in theses exercises is related to the paper
+[Scabia et al. 2022](https://moodle.epfl.ch/pluginfile.php/3185193/mod_folder/content/0/ScabiaNatComm2022.pdf).
+It contains RNA-seq data of human tumor samples.
+The raw read counts are in the file
+[Scabia_rnaseq_counts.txt](https://drive.switch.ch/index.php/s/pfQxPuSlVdNkgYI)
+in which each gene is identified by its [Ensembl gene id](https://www.ensembl.org/Homo_sapiens/Info/Annotation).
+
+The samples are annotated with various parameters (treatment type, mouse id, batch nb, "pdx": patient donor code) in the file
+[Scabia_rnaseq_metadata.txt](https://drive.switch.ch/index.php/s/pfQxPuSlVdNkgYI).
+
+## Step 1: Data formatting, quality check, normlization
+
+Load both data files and use [biomaRt::getBM](https://www.rdocumentation.org/packages/biomaRt/versions/2.28.0/topics/getBM) to retrieve annotations for the genes: common gene names and transcript lengths.
+
+```{r}
+#| label: Load files
+
+library(biomaRt)
+
+raw.counts = read.table("datasets/Scabia_rnaseq_counts.txt")
+coldata = read.table("datasets/Scabia_rnaseq_metadata.txt")
+
+## transform numbers into strings for later...
+coldata$batch = as.character(coldata$batch)
+
+ensembl = useEnsembl(biomart="genes", dataset="hsapiens_gene_ensembl") 
+tgene = getBM(
+           attributes=c("ensembl_gene_id", 'transcript_length', "external_gene_name"),
+           filters="ensembl_gene_id",
+           values=rownames(raw.counts), mart=ensembl)
+t2 = as.data.frame(
+           sapply(split(tgene$transcript_length, tgene$ensembl_gene_id), max))
+t3 = as.data.frame(
+           sapply(split(tgene$external_gene_name, tgene$ensembl_gene_id), unique))
+gene.annot = t2
+names(gene.annot) = "length"
+gene.annot[rownames(t3), "gene_name"] = t3[,1]
+
+txl = gene.annot[rownames(raw.counts),"length"]
+lsize = apply(raw.counts, 2, sum)
+rpkm = sweep(sweep(raw.counts, 1, 1e-3*txl, "/"), 2, 1e-6*lsize, "/")
+
+par(mar=c(4,4,0,0)+.5, las=1, lwd=2, lty=1, cex.axis=.6, pch=20)
+plot(txl, apply(raw.counts, 1, median, na.rm=T), log='xy', cex=.5,
+     xlim=c(5e2, 5e4), ylim=c(1,1e4), xlab='Transcript length', ylab='Counts')
+points(txl, apply(rpkm, 1, median, na.rm=T), col=2, cex=.5)
+```
+
+1. Show that there is a linear trend between counts and transcript length
+Use the longest transcript for each gene and plot against median counts for each gene.
+
+2. Calculate "RPKM" values (reads per kilobase per million)
+Divide each count value by
+$10^{-3}*$transcript length (transcript length in kilobases)
+and divide again by the $10^{-6}*$total counts for the sample
+(the total number of reads in millions).
+
+3. Filter and normalize data
+ * Eliminate genes which are expressed in less than 45 samples or have a median expression below 1.
+ * Check the normalization: plot the distributions of log2 expression levels per sample as a boxplot.
+ * Calculate the median-normalized data (divide every sample by it median) and plot the distributions of log2 values.
+```{r}
+sample.by.gene = apply(rpkm > 0, 1, sum)
+median.by.gene = apply(rpkm, 1, median)
+ExprGenes = which(sample.by.gene > 44 & median.by.gene > 1)
+
+l2rpkm = log2(rpkm[ExprGenes,])
+lognorm = sweep(l2rpkm, 2, apply(l2rpkm, 2, median, na.rm=T))
+
+par(mfrow=c(2,1), mar=c(4,4,0,0)+.5, las=2, lwd=2, lty=1,
+    cex.axis=.6, pch=20, cex=.5)
+boxplot(l2rpkm, lty=1)
+boxplot(lognorm, lty=1)
+```
+ 
+
+## Step 2: Batch effect
+
+We want to determine genes that vary between treatments.
+We first make a visual exploration of the data variability using a clustered heatmap.
+
+Select genes that have a standard deviation of at least 1 across samples,
+and make a heatmap of that selection.
+```{r}
+#| label: Heatmap
+#| fig-height: 8
+
+library(pheatmap)
+
+ColB = c("1"='black', "2"='grey')
+ColT = c("E2"='red', "E2P4"='green', "P4"='blue', "CTRL"='gray')
+
+Isd1 = which(apply(lognorm, 1, sd) > 1)
+displdata = lognorm[Isd1,]
+
+pheatmap(displdata, show_rownames=F, show_colnames=F,
+         annotation_col=coldata[,c("treatment","batch","pdx")],
+         scale='row', clustering_distance_rows='correlation',
+         clustering_distance_cols='correlation', clustering_method='complete',
+         annotation_colors=list(batch=ColB, treatment=ColT))
+```
+
+We observe a strong "batch" effect: samples are clustered according to "pdx", the sample origin,
+and not according to biological effects such as treatment.
+
+This can be confirmed by PCA (using the PCAtools library):
+calculate the [pca](https://www.rdocumentation.org/packages/PCAtools/versions/2.5.13)
+of the same data as the heatmap.
+
+Then use *biplot* and *pairsplot* to show that sample are separated mostly according to the *pdx* variable.
+
+```{r}
+#| label: PCA
+library(PCAtools)
+
+pc1 = PCAtools::pca(displdata, metadata=coldata)
+PCAtools::biplot(pc1, colby="treatment", shape="pdx",
+                 legendPosition="right", lab=NULL)
+```
+
+```{r}
+#| label: PCApairs
+#| fig-width: 14
+#| fig-height: 8
+
+PCAtools::pairsplot(pc1, colby="treatment", shape="pdx",
+                    legendPosition="right", lab=NULL,
+                    components=c("PC1","PC2","PC3"))
+```
+
+
+## Step 3: Linear models and analysis of differential expression
+
+We will use *[limma](https://www.rdocumentation.org/packages/limma/versions/3.28.14)*
+to identify differentially expressed genes.
+
+Based on the above observation of a batch effect, we will use a linear model
+that includes *pdf* and *treatment* as factors: *logFC ~ 0+pdx+treatment*. 
+
+This is realized with the help of a
+*[model matrix](https://www.rdocumentation.org/packages/limma/versions/3.28.14/topics/modelMatrix)*
+and the function
+*[lmFit](https://www.rdocumentation.org/packages/limma/versions/3.28.14/topics/lmFit)*.
+
+The gene-wise p-values and average fold-change are then extracted with an
+*[empirical bayes](https://www.rdocumentation.org/packages/limma/versions/3.28.14/topics/ebayes)* method.
+
+ * Make a "Volcano" plot of *-log10(p-value)* as a function of *log fold-change* and identify
+ the genes with an absolute fold-change >2 and an adjusted p-value less than 5%.
+
+```{r}
+#| label: Volcano
+library(limma)
+
+design = model.matrix(~0+pdx+treatment, data=coldata)
+lin.models = lmFit(lognorm, design)
+fit = eBayes(lin.models)
+degs = topTable(fit, coef="treatmentE2", number=Inf)
+Isignif = which(abs(degs$logFC) > 1 & degs$adj.P.Val < .05)
+fc = degs$logFC
+lp = -log10(degs$adj.P.Val)
+
+par(mar=c(4,4,0,0)+.5, las=1, lwd=2, lty=1, pch=20)
+plot(fc, lp, xlab="log fold-change", ylab="-log10(p-value)")
+points(fc[Isignif], lp[Isignif], col=2)
+text(fc[Isignif], lp[Isignif], 
+     gene.annot[rownames(degs)[Isignif], "gene_name"],
+     pos=1, cex=.5)
+```
